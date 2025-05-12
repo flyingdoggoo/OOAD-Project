@@ -1,0 +1,183 @@
+﻿// CalendarManager.cs
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using CalendarApp.Models;
+using CalendarApp.Data;
+using Microsoft.EntityFrameworkCore;
+
+namespace CalendarApp.Services
+{
+    public class CalendarManager : IDisposable
+    {
+        private readonly CalendarDbContext _db;
+        private User _currentUser;
+
+        // Property để truy cập Context từ bên ngoài nếu cần (ví dụ: trong Form1 khi tạo Individual Appt)
+        public CalendarDbContext Context => _db;
+
+        public CalendarManager(string currentUsername)
+        {
+            _db = new CalendarDbContext();
+            _currentUser = _db.Users.FirstOrDefault(u => u.Username == currentUsername);
+            if (_currentUser == null)
+            {
+                throw new InvalidOperationException($"User '{currentUsername}' not found.");
+            }
+        }
+
+        public User GetCurrentUser() => _currentUser;
+
+        // --- AddAppointment với Logic Mới ---
+        public (AppointmentActionResult Status, string Message, Appointment RelatedAppointment) AddAppointment(
+            string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
+        {
+            // --- Bước 1: Validation cơ bản ---
+            if (string.IsNullOrWhiteSpace(name)) return (AppointmentActionResult.ValidationError, "Name is required.", null);
+            if (endTime <= startTime) return (AppointmentActionResult.ValidationError, "End time must be after start.", null);
+            // Validation Reminder Time ngay từ đầu
+            if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
+            {
+                return (AppointmentActionResult.ValidationError, "Reminder time must be before the appointment start time.", null);
+            }
+
+            // --- Bước 2: Kiểm tra Conflict thời gian ---
+            var conflictingAppointment = _db.Appointments
+                .Where(a => a.OwnerId == _currentUser.Id)
+                .AsEnumerable()
+                .FirstOrDefault(appt => startTime < appt.EndTime && endTime > appt.StartTime);
+
+            if (conflictingAppointment != null)
+            {
+                string conflictMessage = $"Conflict: Existing appointment '{conflictingAppointment.Name}' ({conflictingAppointment.StartTime:g} - {conflictingAppointment.EndTime:g}). Choose 'Replace' or 'Reschedule'.";
+                return (AppointmentActionResult.ConflictDetected, conflictMessage, conflictingAppointment);
+            }
+
+            // --- Bước 3: Kiểm tra Group Meeting phù hợp để Join ---
+            var potentialGroupMeeting = _db.Appointments.OfType<GroupMeeting>()
+               .Include(gm => gm.MeetingParticipants) // Cần để kiểm tra user đã join chưa
+               .AsEnumerable()
+               .FirstOrDefault(gm =>
+                   (gm.Name.Equals(name, StringComparison.OrdinalIgnoreCase) || (gm.StartTime == startTime && gm.EndTime == endTime))
+                   &&
+                   !gm.MeetingParticipants.Any(mp => mp.ParticipantId == _currentUser.Id));
+
+            if (potentialGroupMeeting != null)
+            {
+                string joinMessage = $"An existing group meeting '{potentialGroupMeeting.Name}' ({potentialGroupMeeting.StartTime:g} - {potentialGroupMeeting.EndTime:g}) matches. Do you want to join it?";
+                return (AppointmentActionResult.AskToJoinGroupMeeting, joinMessage, potentialGroupMeeting);
+            }
+
+            // --- Bước 4: Kiểm tra trùng địa điểm (Tùy chọn - Bỏ qua trong ví dụ này) ---
+
+            // --- Bước 5: Tạo Appointment mới ---
+            try
+            {
+                Appointment newAppt = new Appointment(name, location, startTime, endTime, _currentUser.Id) { Owner = _currentUser };
+                _db.Appointments.Add(newAppt);
+
+                if (reminderTime.HasValue) // Đã validate ở Bước 1
+                {
+                    Reminder newReminder = new Reminder(reminderTime.Value, 0, _currentUser.Id) { User = _currentUser, RelatedAppointment = newAppt };
+                    _db.Reminders.Add(newReminder);
+                }
+
+                _db.SaveChanges();
+                return (AppointmentActionResult.Success, "Appointment added successfully.", newAppt);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving new appointment: {ex.InnerException?.Message ?? ex.Message}");
+                return (AppointmentActionResult.DatabaseError, $"Error saving appointment: {ex.InnerException?.Message ?? ex.Message}", null);
+            }
+        }
+
+        // --- Các hàm hỗ trợ khác ---
+        public (bool success, string message, Appointment newAppointment) PerformReplaceAppointment(
+            Appointment appointmentToReplace, string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
+        {
+            var currentUserInDb = _db.Users.Find(_currentUser.Id);
+            if (currentUserInDb == null) return (false, "Current user not tracked.", null);
+
+            var oldAppointmentInDb = _db.Appointments.Find(appointmentToReplace.Id);
+            if (oldAppointmentInDb == null || oldAppointmentInDb.OwnerId != currentUserInDb.Id) return (false, "Could not find appointment to replace or permission denied.", null);
+
+            // Validation reminder cho cái mới
+            if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
+            {
+                return (false, "New reminder time must be before the new start time.", null);
+            }
+
+            var oldReminders = _db.Reminders.Where(r => r.RelatedAppointmentId == oldAppointmentInDb.Id).ToList();
+            if (oldReminders.Any()) _db.Reminders.RemoveRange(oldReminders);
+            _db.Appointments.Remove(oldAppointmentInDb);
+
+            Appointment newAppt = new Appointment(name, location, startTime, endTime, currentUserInDb.Id) { Owner = currentUserInDb };
+            _db.Appointments.Add(newAppt);
+
+            if (reminderTime.HasValue)
+            {
+                Reminder newReminder = new Reminder(reminderTime.Value, 0, currentUserInDb.Id) { User = currentUserInDb, RelatedAppointment = newAppt };
+                _db.Reminders.Add(newReminder);
+            }
+
+            try
+            {
+                _db.SaveChanges();
+                return (true, "Appointment replaced successfully.", newAppt);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error replacing appointment: {ex.InnerException?.Message ?? ex.Message}");
+                return (false, $"Error saving replaced appointment: {ex.InnerException?.Message ?? ex.Message}", null);
+            }
+        }
+
+        public bool ConfirmJoinGroupMeeting(int meetingId, User userJoining)
+        {
+            var meeting = _db.Appointments.OfType<GroupMeeting>().FirstOrDefault(m => m.Id == meetingId);
+            var userInDb = _db.Users.Find(userJoining.Id);
+            if (meeting == null || userInDb == null) return false;
+
+            bool alreadyExists = _db.GroupMeetingParticipants.Any(gmp => gmp.GroupMeetingId == meetingId && gmp.ParticipantId == userInDb.Id);
+            if (alreadyExists) return true; // Already joined
+
+            var joinEntry = new GroupMeetingParticipant { GroupMeetingId = meeting.Id, ParticipantId = userInDb.Id };
+            _db.GroupMeetingParticipants.Add(joinEntry);
+            try
+            {
+                _db.SaveChanges(); return true;
+            }
+            catch (Exception ex) { Console.WriteLine($"Error saving join entry: {ex.InnerException?.Message ?? ex.Message}"); return false; }
+        }
+
+        // Public để Form1 có thể gọi nếu cần (ví dụ khi tạo individual appt sau khi từ chối join)
+        public bool IsValidReminderTime(DateTime reminderDateTime, DateTime appointmentStartDateTime)
+        {
+            return reminderDateTime < appointmentStartDateTime;
+        }
+
+        public List<Appointment> GetUserAppointments(User user)
+        {
+            if (user == null) return new List<Appointment>();
+            return _db.Appointments.Where(a => a.OwnerId == user.Id).OrderBy(a => a.StartTime).ToList();
+        }
+        public List<Reminder> GetUserReminders(User user)
+        {
+            if (user == null) return new List<Reminder>();
+            return _db.Reminders.Where(r => r.UserId == user.Id).Include(r => r.RelatedAppointment).OrderBy(r => r.TriggerTime).ToList();
+        }
+        public void Dispose() { _db?.Dispose(); GC.SuppressFinalize(this); }
+    }
+
+    // Enum để xác định kết quả của AddAppointment
+    public enum AppointmentActionResult
+    {
+        Success,
+        ValidationError,
+        ConflictDetected,
+        AskToJoinGroupMeeting,
+        DatabaseError,
+        UnknownError
+    }
+}

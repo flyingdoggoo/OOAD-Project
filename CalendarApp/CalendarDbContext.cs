@@ -65,9 +65,12 @@ namespace CalendarApp.Data
 
             // --- Seed Data ---
             var testUserId1 = 1; var testUserId2 = 2;
+            var testUserId3 = 3; var testUserId4 = 4;
             modelBuilder.Entity<User>().HasData(
-                new { Id = testUserId1, Username = "user1", Password = "password1" },
-                new { Id = testUserId2, Username = "user2", Password = "password2" });
+                new { Id = testUserId1, Username = "user1", Password = "123456" },
+                new { Id = testUserId2, Username = "user2", Password = "654321" },
+                new { Id = testUserId3, Username = "user3", Password = "111111" },
+                new { Id = testUserId4, Username = "user4", Password = "000000" });
 
             var appointmentId1 = 1; var appointmentId2 = 2; var groupMeetingId3 = 3;
             modelBuilder.Entity<Appointment>().HasData(

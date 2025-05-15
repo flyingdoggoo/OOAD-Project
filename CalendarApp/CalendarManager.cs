@@ -13,7 +13,6 @@ namespace CalendarApp.Services
         private readonly CalendarDbContext _db;
         private User _currentUser;
 
-        // Property để truy cập Context từ bên ngoài nếu cần (ví dụ: trong Form1 khi tạo Individual Appt)
         public CalendarDbContext Context => _db;
 
         public CalendarManager(string currentUsername)
@@ -30,68 +29,157 @@ namespace CalendarApp.Services
 
         // --- AddAppointment với Logic Mới ---
         public (AppointmentActionResult Status, string Message, Appointment RelatedAppointment) AddAppointment(
-            string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
+    string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime, bool forceIndividual = false)
         {
             // --- Bước 1: Validation cơ bản ---
             if (string.IsNullOrWhiteSpace(name)) return (AppointmentActionResult.ValidationError, "Name is required.", null);
-            if (endTime <= startTime) return (AppointmentActionResult.ValidationError, "End time must be after start.", null);
-            // Validation Reminder Time ngay từ đầu
+            if (endTime <= startTime) return (AppointmentActionResult.ValidationError, "End time must be after start time.", null);
             if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
             {
                 return (AppointmentActionResult.ValidationError, "Reminder time must be before the appointment start time.", null);
             }
 
-            // --- Bước 2: Kiểm tra Conflict thời gian ---
+            TimeSpan inputDuration = endTime - startTime;
+
+            if (!forceIndividual)
+            {
+                string nameUpper = name.ToUpper();
+
+                var potentialGroupMeetingToJoin = _db.Appointments.OfType<GroupMeeting>()
+                   .Where(gm => gm.Name.ToUpper() == nameUpper && 
+                                (gm.StartTime < endTime && gm.EndTime > startTime)) 
+                   .Include(gm => gm.MeetingParticipants)
+                   .AsEnumerable() 
+                   .FirstOrDefault(gm =>
+                       (gm.EndTime - gm.StartTime) == inputDuration &&
+                      // gm.Location.Equals(location, StringComparison.OrdinalIgnoreCase) && // If you add this, also convert gm.Location.ToUpper() == location.ToUpper()
+                       !gm.MeetingParticipants.Any(mp => mp.ParticipantId == _currentUser.Id) // User is not already a participant
+                   );
+
+                if (potentialGroupMeetingToJoin != null)
+                {
+                    string joinMessage = $"A group meeting '{potentialGroupMeetingToJoin.Name}' with the same name and duration exists at this time. Join it?:{potentialGroupMeetingToJoin.Id}";
+                    return (AppointmentActionResult.AskToJoinGroupMeeting, joinMessage, potentialGroupMeetingToJoin);
+                }
+            }
+
             var conflictingAppointment = _db.Appointments
-                .Where(a => a.OwnerId == _currentUser.Id)
-                .AsEnumerable()
-                .FirstOrDefault(appt => startTime < appt.EndTime && endTime > appt.StartTime);
+                .Include(a => (a as GroupMeeting).MeetingParticipants)
+                .Where(a =>
+                    (a.OwnerId == _currentUser.Id || (a is GroupMeeting && ((GroupMeeting)a).MeetingParticipants.Any(mp => mp.ParticipantId == _currentUser.Id))) &&
+                    (startTime < a.EndTime && endTime > a.StartTime)
+                   )
+                .FirstOrDefault();
 
             if (conflictingAppointment != null)
             {
-                string conflictMessage = $"Conflict: Existing appointment '{conflictingAppointment.Name}' ({conflictingAppointment.StartTime:g} - {conflictingAppointment.EndTime:g}). Choose 'Replace' or 'Reschedule'.";
+                string conflictMessage = conflictingAppointment is GroupMeeting
+                    ? $"You are already scheduled for a group meeting '{conflictingAppointment.Name}' during this time."
+                    : $"You already have an appointment '{conflictingAppointment.Name}' scheduled during this time.";
                 return (AppointmentActionResult.ConflictDetected, conflictMessage, conflictingAppointment);
             }
 
-            // --- Bước 3: Kiểm tra Group Meeting phù hợp để Join ---
-            var potentialGroupMeeting = _db.Appointments.OfType<GroupMeeting>()
-               .Include(gm => gm.MeetingParticipants) // Cần để kiểm tra user đã join chưa
-               .AsEnumerable()
-               .FirstOrDefault(gm =>
-                   (gm.Name.Equals(name, StringComparison.OrdinalIgnoreCase) || (gm.StartTime == startTime && gm.EndTime == endTime))
-                   &&
-                   !gm.MeetingParticipants.Any(mp => mp.ParticipantId == _currentUser.Id));
-
-            if (potentialGroupMeeting != null)
-            {
-                string joinMessage = $"An existing group meeting '{potentialGroupMeeting.Name}' ({potentialGroupMeeting.StartTime:g} - {potentialGroupMeeting.EndTime:g}) matches. Do you want to join it?";
-                return (AppointmentActionResult.AskToJoinGroupMeeting, joinMessage, potentialGroupMeeting);
-            }
-
-            // --- Bước 4: Kiểm tra trùng địa điểm (Tùy chọn - Bỏ qua trong ví dụ này) ---
-
-            // --- Bước 5: Tạo Appointment mới ---
+            // --- Bước 4: Tạo Appointment mới ---
             try
             {
                 Appointment newAppt = new Appointment(name, location, startTime, endTime, _currentUser.Id) { Owner = _currentUser };
                 _db.Appointments.Add(newAppt);
 
-                if (reminderTime.HasValue) // Đã validate ở Bước 1
+                if (reminderTime.HasValue)
                 {
-                    Reminder newReminder = new Reminder(reminderTime.Value, 0, _currentUser.Id) { User = _currentUser, RelatedAppointment = newAppt };
+                    Reminder newReminder = new Reminder(reminderTime.Value, 0, _currentUser.Id)
+                    { User = _currentUser, RelatedAppointment = newAppt };
                     _db.Reminders.Add(newReminder);
                 }
 
                 _db.SaveChanges();
                 return (AppointmentActionResult.Success, "Appointment added successfully.", newAppt);
             }
+            catch (DbUpdateException dbEx)
+            {
+                Console.WriteLine($"DB Save Error in AddAppointment: {dbEx.InnerException?.Message ?? dbEx.Message}");
+                return (AppointmentActionResult.DatabaseError, $"Error saving appointment: {dbEx.InnerException?.Message ?? dbEx.Message}", null);
+            }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error saving new appointment: {ex.InnerException?.Message ?? ex.Message}");
-                return (AppointmentActionResult.DatabaseError, $"Error saving appointment: {ex.InnerException?.Message ?? ex.Message}", null);
+                Console.WriteLine($"Generic Save Error in AddAppointment: {ex.Message}");
+                return (AppointmentActionResult.UnknownError, $"An unexpected error occurred: {ex.Message}", null);
             }
         }
 
+
+        public (AppointmentActionResult Status, string Message, Appointment RelatedAppointment) AddGroupMeeting(
+           string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
+        {
+            // --- Validation ---
+            if (string.IsNullOrWhiteSpace(name)) return (AppointmentActionResult.ValidationError, "Meeting name is required.", null);
+            if (endTime <= startTime) return (AppointmentActionResult.ValidationError, "End time must be after start time.", null);
+            if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
+            {
+                return (AppointmentActionResult.ValidationError, "Reminder time must be before the meeting start time.", null);
+            }
+
+            // --- Check for Conflict with the CREATOR's existing schedule ---
+            var conflictingAppointmentForCreator = _db.Appointments
+                .Include(a => (a as GroupMeeting).MeetingParticipants)
+                .Where(a =>
+                    (a.OwnerId == _currentUser.Id || (a is GroupMeeting && ((GroupMeeting)a).MeetingParticipants.Any(mp => mp.ParticipantId == _currentUser.Id))) &&
+                    (startTime < a.EndTime && endTime > a.StartTime) // Time overlap
+                   )
+                .FirstOrDefault();
+
+            if (conflictingAppointmentForCreator != null)
+            {
+                string conflictMessage = conflictingAppointmentForCreator is GroupMeeting
+                    ? $"This new group meeting conflicts with your existing group meeting: '{conflictingAppointmentForCreator.Name}'."
+                    : $"This new group meeting conflicts with your existing appointment: '{conflictingAppointmentForCreator.Name}'.";
+                return (AppointmentActionResult.ConflictDetected, conflictMessage, conflictingAppointmentForCreator);
+            }
+
+            // --- Create New GroupMeeting ---
+            try
+            {
+                var newGroupMeeting = new GroupMeeting // Create a GroupMeeting instance
+                {
+                    Name = name,
+                    Location = location,
+                    StartTime = startTime,
+                    EndTime = endTime,
+                    OwnerId = _currentUser.Id,
+                    Owner = _currentUser
+                };
+                _db.Appointments.Add(newGroupMeeting); // Add to the Appointments DbSet
+
+                // Add the creator as the first participant
+                var initialParticipant = new GroupMeetingParticipant
+                {
+                    GroupMeeting = newGroupMeeting, // Link to the new group meeting
+                    ParticipantId = _currentUser.Id,
+                    Participant = _currentUser
+                };
+                _db.GroupMeetingParticipants.Add(initialParticipant);
+
+                if (reminderTime.HasValue)
+                {
+                    Reminder newReminder = new Reminder(reminderTime.Value, 0, _currentUser.Id)
+                    { User = _currentUser, RelatedAppointment = newGroupMeeting };
+                    _db.Reminders.Add(newReminder);
+                }
+
+                _db.SaveChanges();
+                return (AppointmentActionResult.Success, "Group meeting created successfully.", newGroupMeeting);
+            }
+            catch (DbUpdateException dbEx)
+            {
+                Console.WriteLine($"DB Error creating group meeting: {dbEx.InnerException?.Message ?? dbEx.Message}");
+                return (AppointmentActionResult.DatabaseError, $"Error saving group meeting: {dbEx.InnerException?.Message ?? dbEx.Message}", null);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Generic Error creating group meeting: {ex.Message}");
+                return (AppointmentActionResult.UnknownError, $"An unexpected error occurred: {ex.Message}", null);
+            }
+        }
         // --- Các hàm hỗ trợ khác ---
         public (bool success, string message, Appointment newAppointment) PerformReplaceAppointment(
             Appointment appointmentToReplace, string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
@@ -157,10 +245,22 @@ namespace CalendarApp.Services
             return reminderDateTime < appointmentStartDateTime;
         }
 
-        public List<Appointment> GetUserAppointments(User user)
+        // In CalendarManager.cs
+
+        public List<Appointment> GetUserAppointments(User user) 
         {
-            if (user == null) return new List<Appointment>();
-            return _db.Appointments.Where(a => a.OwnerId == user.Id).OrderBy(a => a.StartTime).ToList();
+            return _db.Appointments
+                .Include(a => (a as GroupMeeting).MeetingParticipants)
+                .Where(a =>
+                    a.OwnerId == user.Id ||
+
+                    (
+                        a is GroupMeeting && 
+                        ((GroupMeeting)a).MeetingParticipants.Any(mp => mp.ParticipantId == user.Id) 
+                    )
+                )
+                .OrderBy(a => a.StartTime)
+                .ToList(); 
         }
         public List<Reminder> GetUserReminders(User user)
         {

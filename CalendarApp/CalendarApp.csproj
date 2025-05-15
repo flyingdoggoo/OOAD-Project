@@ -195,9 +195,15 @@
     </Compile>
     <Compile Include="GroupMeeting.cs" />
     <Compile Include="GroupMeetingParticipant.cs" />
-    <Compile Include="Migrations\20250512161528_Initial.cs" />
-    <Compile Include="Migrations\20250512161528_Initial.Designer.cs">
-      <DependentUpon>20250512161528_Initial.cs</DependentUpon>
+    <Compile Include="login.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="login.Designer.cs">
+      <DependentUpon>login.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Migrations\20250514180015_init.cs" />
+    <Compile Include="Migrations\20250514180015_init.Designer.cs">
+      <DependentUpon>20250514180015_init.cs</DependentUpon>
     </Compile>
     <Compile Include="Migrations\CalendarDbContextModelSnapshot.cs" />
     <Compile Include="Program.cs" />
@@ -206,6 +212,9 @@
     <Compile Include="User.cs" />
     <EmbeddedResource Include="Form1.resx">
       <DependentUpon>Form1.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="login.resx">
+      <DependentUpon>login.cs</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>

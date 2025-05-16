@@ -1,5 +1,4 @@
-﻿// CalendarManager.cs
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using CalendarApp.Models;
@@ -27,7 +26,6 @@ namespace CalendarApp.Services
 
         public User GetCurrentUser() => _currentUser;
 
-        // --- AddAppointment với Logic Mới ---
         public (AppointmentActionResult Status, string Message, Appointment RelatedAppointment) AddAppointment(
     string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime, bool forceIndividual = false)
         {
@@ -111,7 +109,6 @@ namespace CalendarApp.Services
         public (AppointmentActionResult Status, string Message, Appointment RelatedAppointment) AddGroupMeeting(
            string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
         {
-            // --- Validation ---
             if (string.IsNullOrWhiteSpace(name)) return (AppointmentActionResult.ValidationError, "Meeting name is required.", null);
             if (endTime <= startTime) return (AppointmentActionResult.ValidationError, "End time must be after start time.", null);
             if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
@@ -119,12 +116,11 @@ namespace CalendarApp.Services
                 return (AppointmentActionResult.ValidationError, "Reminder time must be before the meeting start time.", null);
             }
 
-            // --- Check for Conflict with the CREATOR's existing schedule ---
             var conflictingAppointmentForCreator = _db.Appointments
                 .Include(a => (a as GroupMeeting).MeetingParticipants)
                 .Where(a =>
                     (a.OwnerId == _currentUser.Id || (a is GroupMeeting && ((GroupMeeting)a).MeetingParticipants.Any(mp => mp.ParticipantId == _currentUser.Id))) &&
-                    (startTime < a.EndTime && endTime > a.StartTime) // Time overlap
+                    (startTime < a.EndTime && endTime > a.StartTime)
                    )
                 .FirstOrDefault();
 
@@ -136,10 +132,9 @@ namespace CalendarApp.Services
                 return (AppointmentActionResult.ConflictDetected, conflictMessage, conflictingAppointmentForCreator);
             }
 
-            // --- Create New GroupMeeting ---
             try
             {
-                var newGroupMeeting = new GroupMeeting // Create a GroupMeeting instance
+                var newGroupMeeting = new GroupMeeting 
                 {
                     Name = name,
                     Location = location,
@@ -148,12 +143,11 @@ namespace CalendarApp.Services
                     OwnerId = _currentUser.Id,
                     Owner = _currentUser
                 };
-                _db.Appointments.Add(newGroupMeeting); // Add to the Appointments DbSet
+                _db.Appointments.Add(newGroupMeeting); 
 
-                // Add the creator as the first participant
                 var initialParticipant = new GroupMeetingParticipant
                 {
-                    GroupMeeting = newGroupMeeting, // Link to the new group meeting
+                    GroupMeeting = newGroupMeeting,
                     ParticipantId = _currentUser.Id,
                     Participant = _currentUser
                 };
@@ -180,32 +174,53 @@ namespace CalendarApp.Services
                 return (AppointmentActionResult.UnknownError, $"An unexpected error occurred: {ex.Message}", null);
             }
         }
-        // --- Các hàm hỗ trợ khác ---
+
         public (bool success, string message, Appointment newAppointment) PerformReplaceAppointment(
             Appointment appointmentToReplace, string name, string location, DateTime startTime, DateTime endTime, DateTime? reminderTime)
         {
-            var currentUserInDb = _db.Users.Find(_currentUser.Id);
-            if (currentUserInDb == null) return (false, "Current user not tracked.", null);
+            if (appointmentToReplace == null) return (false, "Original appointment to replace is null.", null);
 
-            var oldAppointmentInDb = _db.Appointments.Find(appointmentToReplace.Id);
-            if (oldAppointmentInDb == null || oldAppointmentInDb.OwnerId != currentUserInDb.Id) return (false, "Could not find appointment to replace or permission denied.", null);
+            var oldAppointmentInDb = _db.Appointments
+                                        .Include(a => (a as GroupMeeting).MeetingParticipants) 
+                                        .FirstOrDefault(a => a.Id == appointmentToReplace.Id);
 
-            // Validation reminder cho cái mới
-            if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
+            if (oldAppointmentInDb == null) return (false, "Could not find appointment to replace in database.", null);
+
+            if (oldAppointmentInDb.OwnerId != _currentUser.Id)
             {
-                return (false, "New reminder time must be before the new start time.", null);
+                return (false, "Permission denied: Only the owner can replace this appointment.", null);
             }
 
-            var oldReminders = _db.Reminders.Where(r => r.RelatedAppointmentId == oldAppointmentInDb.Id).ToList();
-            if (oldReminders.Any()) _db.Reminders.RemoveRange(oldReminders);
+            if (reminderTime.HasValue && !IsValidReminderTime(reminderTime.Value, startTime))
+            {
+                return (false, "New reminder time must be before the new start time. Replacement aborted.", null);
+            }
+
+            if (oldAppointmentInDb is GroupMeeting oldGroupMeeting)
+            {
+                if (oldGroupMeeting.MeetingParticipants != null && oldGroupMeeting.MeetingParticipants.Any())
+                {
+                    _db.GroupMeetingParticipants.RemoveRange(oldGroupMeeting.MeetingParticipants);
+                }
+            }
+
+            var remindersToDelete = _db.Reminders
+                                       .Where(r => r.RelatedAppointmentId == oldAppointmentInDb.Id)
+                                       .ToList();
+            if (remindersToDelete.Any())
+            {
+                _db.Reminders.RemoveRange(remindersToDelete);
+            }
+
             _db.Appointments.Remove(oldAppointmentInDb);
 
-            Appointment newAppt = new Appointment(name, location, startTime, endTime, currentUserInDb.Id) { Owner = currentUserInDb };
+            Appointment newAppt = new Appointment(name, location, startTime, endTime, _currentUser.Id) { Owner = _currentUser };
             _db.Appointments.Add(newAppt);
 
-            if (reminderTime.HasValue)
+            if (reminderTime.HasValue) 
             {
-                Reminder newReminder = new Reminder(reminderTime.Value, 0, currentUserInDb.Id) { User = currentUserInDb, RelatedAppointment = newAppt };
+                Reminder newReminder = new Reminder(reminderTime.Value, 0, _currentUser.Id)
+                { User = _currentUser, RelatedAppointment = newAppt };
                 _db.Reminders.Add(newReminder);
             }
 
@@ -216,8 +231,8 @@ namespace CalendarApp.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error replacing appointment: {ex.InnerException?.Message ?? ex.Message}");
-                return (false, $"Error saving replaced appointment: {ex.InnerException?.Message ?? ex.Message}", null);
+                Console.WriteLine($"Generic Error replacing appointment: {ex.Message}");
+                return (false, $"An unexpected error occurred during replacement: {ex.Message}", null);
             }
         }
 
@@ -228,7 +243,7 @@ namespace CalendarApp.Services
             if (meeting == null || userInDb == null) return false;
 
             bool alreadyExists = _db.GroupMeetingParticipants.Any(gmp => gmp.GroupMeetingId == meetingId && gmp.ParticipantId == userInDb.Id);
-            if (alreadyExists) return true; // Already joined
+            if (alreadyExists) return true; 
 
             var joinEntry = new GroupMeetingParticipant { GroupMeetingId = meeting.Id, ParticipantId = userInDb.Id };
             _db.GroupMeetingParticipants.Add(joinEntry);
@@ -239,13 +254,10 @@ namespace CalendarApp.Services
             catch (Exception ex) { Console.WriteLine($"Error saving join entry: {ex.InnerException?.Message ?? ex.Message}"); return false; }
         }
 
-        // Public để Form1 có thể gọi nếu cần (ví dụ khi tạo individual appt sau khi từ chối join)
         public bool IsValidReminderTime(DateTime reminderDateTime, DateTime appointmentStartDateTime)
         {
             return reminderDateTime < appointmentStartDateTime;
         }
-
-        // In CalendarManager.cs
 
         public List<Appointment> GetUserAppointments(User user) 
         {
@@ -270,7 +282,6 @@ namespace CalendarApp.Services
         public void Dispose() { _db?.Dispose(); GC.SuppressFinalize(this); }
     }
 
-    // Enum để xác định kết quả của AddAppointment
     public enum AppointmentActionResult
     {
         Success,

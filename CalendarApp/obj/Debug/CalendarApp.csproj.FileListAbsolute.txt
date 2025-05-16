@@ -209,3 +209,5 @@ E:\OOAD-Project\CalendarApp\obj\Debug\Calendar.745FF2A6.Up2Date
 E:\OOAD-Project\CalendarApp\obj\Debug\CalendarApp.exe
 E:\OOAD-Project\CalendarApp\obj\Debug\CalendarApp.pdb
 E:\OOAD-Project\CalendarApp\obj\Debug\CalendarApp.login.resources
+E:\OOAD-Project\CalendarApp\obj\Debug\CalendarApp.addAppointment.resources
+E:\OOAD-Project\CalendarApp\obj\Debug\CalendarApp.signup.resources

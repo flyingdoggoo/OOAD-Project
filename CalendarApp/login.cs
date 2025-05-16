@@ -43,7 +43,6 @@ namespace CalendarApp
 
                     if (authenticatedUser != null)
                     {
-                        // Login successful
                         Form1 mainForm = new Form1(authenticatedUser); 
                         mainForm.FormClosed += MainForm_FormClosed;  
                         mainForm.Show();
@@ -51,9 +50,8 @@ namespace CalendarApp
                     }
                     else
                     {
-                        // Login failed
                         MessageBox.Show("Invalid username or password.", "Login Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        passTxt.Clear(); // Clear password field for re-entry
+                        passTxt.Clear(); 
                         passTxt.Focus();
                     }
                 }
@@ -78,6 +76,14 @@ namespace CalendarApp
             userTxt.Clear();
             passTxt.Clear();
             userTxt.Focus();
+        }
+
+        private void signupBtn_Click(object sender, EventArgs e)
+        {
+            signup signupForm = new signup();
+            signupForm.FormClosed += (s, args) => this.Show();
+            signupForm.Show();
+            this.Hide();
         }
     }
 }
